@@ -1,4 +1,8 @@
-const MODEL = "claude-3-5-haiku-20241022";
+const MODELS = [
+  "claude-haiku-4-5-20251001",
+  "claude-3-5-haiku-latest",
+  "claude-sonnet-4-5-20250929",
+];
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -37,24 +41,33 @@ exports.handler = async (event) => {
   if (!messages[0] || !messages[messages.length - 1].content)
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "لا يوجد سؤال" }) };
 
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({ model: MODEL, max_tokens: 400, system: SYSTEM, messages }),
-    });
+  let lastErr = "خطأ من الخدمة";
 
-    const data = await res.json();
-    if (!res.ok)
-      return { statusCode: res.status, headers: CORS, body: JSON.stringify({ error: (data.error && data.error.message) || "خطأ من الخدمة" }) };
+  for (const model of MODELS) {
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({ model, max_tokens: 400, system: SYSTEM, messages }),
+      });
 
-    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
-    return { statusCode: 200, headers: CORS, body: JSON.stringify({ reply: text }) };
-  } catch (e) {
-    return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "تعذّر الاتصال بالخدمة" }) };
+      const data = await res.json();
+
+      if (res.ok) {
+        const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+        return { statusCode: 200, headers: CORS, body: JSON.stringify({ reply: text, model }) };
+      }
+
+      lastErr = (data.error && data.error.message) || lastErr;
+      if (res.status !== 404) break;
+    } catch (e) {
+      lastErr = "تعذّر الاتصال بالخدمة";
+    }
   }
+
+  return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: lastErr }) };
 };
