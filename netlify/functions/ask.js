@@ -50,6 +50,8 @@ const VISION = `أنت فاحص بصري متخصص في العود والبخو
 أعد جوابك بصيغة JSON فقط، بلا أي نص خارجها وبلا علامات كود:
 {"score": رقم من 0 إلى 100, "verdict": "أصلي" أو "مشكوك" أو "مغشوش" أو "غير واضح", "type":"النوع المرجّح أو نص فارغ", "reasons": [{"text":"البند والملاحظة عليه","grade":"طبيعي" أو "مريب" أو "غير محدد","ok":true أو false}], "advice":"سطران بالعربية"}
 
+اجعل ok=true لكل بند طبيعي وok=false لكل بند مريب أو غير محدد؛ الدرجة تُحسب من البنود المقروءة: إن لم يكن فيها بند مريب فالدرجة ١٠٠.
+
 reasons يجب أن تحتوي ثمانية عناصر بترتيب البنود أعلاه، كل نص أقل من اثنتي عشرة كلمة. إن تعذّرت قراءة بند من الصورة فاجعل grade "غير محدد" وok=false واذكر السبب.
 
 في advice ذكّر دائمًا بأن التأكد النهائي يحتاج تجربة الحرق والرائحة.`;
@@ -111,10 +113,22 @@ exports.handler = async (event) => {
     content.push({ type: "image", source: { type: "base64", media_type: payload.image.mime || "image/jpeg", data: payload.image.data } });
     content.push({ type: "text", text: "افحص هذه العينة حسب البنود الثمانية وأعد JSON فقط." });
 
-    const r = await call(VISION_MODELS, { max_tokens: 1400, system: VISION, messages: [{ role: "user", content }] }, key);
+    const r = await call(VISION_MODELS, { max_tokens: 1400, temperature: 0, system: VISION, messages: [{ role: "user", content }] }, key);
     if (!r.ok) return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: r.error }) };
     let vision = null;
     try { vision = JSON.parse(r.text.replace(/```json|```/g, "").trim()); } catch (e) {}
+    if (vision && Array.isArray(vision.reasons) && vision.reasons.length && vision.verdict !== "غير واضح") {
+      const na = x => /غير محدد/.test(String(x && x.grade || ""));
+      const ok = vision.reasons.filter(x => x && x.ok === true).length;
+      const bad = vision.reasons.filter(x => x && x.ok !== true && !na(x)).length;
+      if (ok + bad >= 4) {
+        vision.score = Math.round(ok / (ok + bad) * 100);
+        vision.verdict = vision.score >= 85 ? "أصلي" : vision.score >= 50 ? "مشكوك" : "مغشوش";
+      } else {
+        vision.score = Math.min(vision.score || 0, 24);
+        vision.verdict = "غير واضح";
+      }
+    }
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ vision, reply: r.text, model: r.model }) };
   }
 
