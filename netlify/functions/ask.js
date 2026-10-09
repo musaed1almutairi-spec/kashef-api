@@ -9,6 +9,64 @@ const VISION_MODELS = [
   "claude-haiku-4-5-20251001",
 ];
 
+const crypto = require("crypto");
+
+// اشتراكات آبل — App Store Server API
+const BUNDLE = "com.kashef.altayeb";
+const LIMITS = {
+  "com.kashef.altayeb.scans20": 20,
+  "com.kashef.altayeb.scans50": 50,
+  "com.kashef.altayeb.scans100": 100,
+};
+const BONUS = 5;
+const b64u = b => Buffer.from(b).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+
+function appleJwt() {
+  const key = (process.env.APPLE_IAP_KEY || "").replace(/\\n/g, "\n");
+  const now = Math.floor(Date.now() / 1000);
+  const h = b64u(JSON.stringify({ alg: "ES256", kid: process.env.APPLE_IAP_KEY_ID, typ: "JWT" }));
+  const p = b64u(JSON.stringify({ iss: process.env.APPLE_ISSUER_ID, iat: now, exp: now + 1200, aud: "appstoreconnect-v1", bid: BUNDLE }));
+  const sig = crypto.sign("sha256", Buffer.from(h + "." + p), { key, dsaEncoding: "ieee-p1363" });
+  return h + "." + p + "." + b64u(sig);
+}
+
+const jwsBody = s => JSON.parse(Buffer.from(String(s).split(".")[1], "base64url").toString("utf8"));
+
+async function subStatus(tx) {
+  if (!/^\d{1,30}$/.test(String(tx || ""))) return { code: "no_sub" };
+  const token = appleJwt();
+  for (const host of ["api.storekit.itunes.apple.com", "api.storekit-sandbox.itunes.apple.com"]) {
+    const r = await fetch("https://" + host + "/inApps/v1/subscriptions/" + tx, { headers: { authorization: "Bearer " + token } });
+    if (r.status === 404) continue;
+    if (!r.ok) throw new Error("storekit " + r.status);
+    const d = await r.json();
+    let found = null;
+    (d.data || []).forEach(g => (g.lastTransactions || []).forEach(t => {
+      const info = jwsBody(t.signedTransactionInfo);
+      if (!LIMITS[info.productId]) return;
+      const active = t.status === 1 || t.status === 4;
+      if (active || !found) found = { active, info };
+    }));
+    if (!found) return { code: "no_sub" };
+    if (!found.active) return { code: "expired" };
+    return { code: "ok", info: found.info };
+  }
+  return { code: "no_sub" };
+}
+
+async function checkScan(tx, event) {
+  const s = await subStatus(tx);
+  if (s.code !== "ok") return s;
+  const { getStore, connectLambda } = require("@netlify/blobs");
+  if (connectLambda) connectLambda(event);
+  const store = getStore("scans");
+  const k = s.info.originalTransactionId + "_" + (s.info.expiresDate || 0);
+  const limit = LIMITS[s.info.productId] + BONUS;
+  const used = Number(await store.get(k)) || 0;
+  if (used >= limit) return { code: "limit", used, limit };
+  return { code: "ok", used, limit, use: () => store.set(k, String(used + 1)) };
+}
+
 let REFS = [];
 try { REFS = require("./refs.json"); } catch (e) { REFS = []; }
 
@@ -48,7 +106,7 @@ const VISION = `أنت فاحص بصري خبير في العود والبخور
 قواعد تعلّمناها من المرجع:
 - العود الفاتح قد يكون أصليًا (السيلاني الفاخر، الكلمنتان). الفتح وحده ليس ضعفًا.
 - الداكن جدًا قد يكون راتنجًا كثيفًا لا صبغًا: الراتنج مطفأ خشن، والصبغ موحّد يغطي العروق.
-- للأصلي نقوش كثيرة: عروق طولية (هندي)، بقع مرقّطة (سيلاني، تراد، فيتنامي)، خطوط شبه متوازية تتبع الألياف (ماليزي). التوازي وحده ليس غشًّا؛ الغش خطوط متطابقة حادة كالمرسومة أو بالليزر.
+- للأصلي نقوش كثيرة: عروق طولية (هندي)، بقع مرقّطة (سيلاني، تراد، فيتنامي)، خطوط شبه متوازية تتبع الألياف (ماليزي). الهندي (السيوفي والجاري) عروقه طولية متقاربة أيضًا، فالخطوط الطولية وحدها لا تكفي للتفريق بين الهندي والماليزي. التوازي وحده ليس غشًّا؛ الغش خطوط متطابقة حادة كالمرسومة أو بالليزر.
 - اللمعان الدهني في مواضع الراتنج طبيعي (الكمبودي). الورنيش لمعان زجاجي يغطي القطعة كلها.
 - المروكي لا يكون طبيعيًا: إن شابهت العينة المروكي فـ match "محسّن" أو "مغشوش" فقط، وverdict "محسّن، مقبول للمناسبات" أو "مؤشرات ضعيفة".
 - القطعة المصقولة المشكّلة باليد (حبة بيضاوية أو مدوّرة ملساء، خرزة، قطعة سطحها ناعم مصقول من كل الجهات) ليست كسرًا خامًا، فلا تكون "طبيعي" أبدًا: match "محسّن" (إن ظهرت العروق تحت الصقل) أو "مغشوش" (إن غطّى اللون العروق)، ونوعها مروكي غالبًا، ولا تكتب لها ماليزي أو هندي. لا علاقة لهذا بحجم القطعة، بل بأنها مصقولة ومشكّلة.
@@ -62,7 +120,7 @@ const VISION = `أنت فاحص بصري خبير في العود والبخور
 
 لا تذكر أسعارًا. لا تستخدم «مغشوش» أو «مزيف» أو «أصلي» جزمًا في نصوص reasons وadvice؛ صف بلغة المؤشرات.
 
-type: نوع العود بكلمة أو كلمتين (هندي، كمبودي، فيتنامي، ماليزي، كلمنتان، مروكي، سيلاني، صيني هاينان…). إن ترددت بين نوعين فاكتب «هندي أو ماليزي». إن لم تعرف فاتركه فارغًا.
+type: نوع العود بكلمة أو كلمتين (هندي، كمبودي، فيتنامي، ماليزي، كلمنتان، مروكي، سيلاني، صيني هاينان…). اكتبه فقط إذا شابهت العينة بوضوح صورة مرجع من النوع نفسه في النقش واللون والسطح معًا. إن ترددت بين نوعين أو لم تجد شبهًا واضحًا فاتركه فارغًا، فالنوع الفارغ أفضل من نوع خاطئ. لا تكتب نوعين.
 
 grade: الدرجة التقديرية من كثافة الراتنج الظاهر:
 - "سوبر": عروق داكنة قليلة وأغلب الخشب فاتح.
@@ -116,6 +174,14 @@ exports.handler = async (event) => {
   catch { return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "طلب غير صالح" }) }; }
 
   if (payload.image && payload.image.data) {
+    // النسخ القديمة (1.1 وما قبلها) لا ترسل v — تبقى مجانية حتى يحدّث المستخدمون
+    let sub = null;
+    if (payload.v) {
+      try { sub = await checkScan(payload.tx, event); }
+      catch (e) { return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "تعذّر التحقق من الاشتراك" }) }; }
+      if (sub.code !== "ok")
+        return { statusCode: 402, headers: CORS, body: JSON.stringify({ code: sub.code, used: sub.used, limit: sub.limit }) };
+    }
     const content = [];
     if (REFS.length) {
       content.push({ type: "text", text: "المرجع — صور حقيقية مؤكدة:" });
@@ -165,7 +231,11 @@ exports.handler = async (event) => {
       if (vision.verdict === "غير واضح" || vision.verdict === "مؤشرات ضعيفة") vision.grade = "";
       if (!/^(سوبر|دبل سوبر|تربل سوبر)$/.test(String(vision.grade || "").trim())) vision.grade = "";
     }
-    return { statusCode: 200, headers: CORS, body: JSON.stringify({ vision, reply: r.text, model: r.model }) };
+    let quota = null;
+    if (sub && vision && vision.verdict !== "غير واضح") {
+      try { await sub.use(); quota = { used: sub.used + 1, limit: sub.limit }; } catch (e) {}
+    }
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({ vision, quota, reply: r.text, model: r.model }) };
   }
 
   const messages = Array.isArray(payload.messages) && payload.messages.length
