@@ -63,8 +63,9 @@ async function checkScan(tx, event) {
   const k = s.info.originalTransactionId + "_" + (s.info.expiresDate || 0);
   const limit = LIMITS[s.info.productId] + BONUS;
   const used = Number(await store.get(k)) || 0;
-  if (used >= limit) return { code: "limit", used, limit };
-  return { code: "ok", used, limit, use: () => store.set(k, String(used + 1)) };
+  const plan = LIMITS[s.info.productId], expires = s.info.expiresDate || 0;
+  if (used >= limit) return { code: "limit", used, limit, plan, expires };
+  return { code: "ok", used, limit, plan, expires, use: () => store.set(k, String(used + 1)) };
 }
 
 let REFS = [];
@@ -173,6 +174,14 @@ exports.handler = async (event) => {
   try { payload = JSON.parse(event.body || "{}"); }
   catch { return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "طلب غير صالح" }) }; }
 
+  // الرصيد فقط — بلا فحص وبلا خصم
+  if (payload.quota) {
+    try {
+      const q = await checkScan(payload.tx, event);
+      return { statusCode: 200, headers: CORS, body: JSON.stringify({ code: q.code, used: q.used, limit: q.limit, plan: q.plan, expires: q.expires }) };
+    } catch (e) { return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "quota" }) }; }
+  }
+
   if (payload.image && payload.image.data) {
     // النسخ القديمة (1.1 وما قبلها) لا ترسل v — تبقى مجانية حتى يحدّث المستخدمون
     let sub = null;
@@ -180,7 +189,7 @@ exports.handler = async (event) => {
       try { sub = await checkScan(payload.tx, event); }
       catch (e) { return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "تعذّر التحقق من الاشتراك" }) }; }
       if (sub.code !== "ok")
-        return { statusCode: 402, headers: CORS, body: JSON.stringify({ code: sub.code, used: sub.used, limit: sub.limit }) };
+        return { statusCode: 402, headers: CORS, body: JSON.stringify({ code: sub.code, used: sub.used, limit: sub.limit, plan: sub.plan, expires: sub.expires }) };
     }
     const content = [];
     if (REFS.length) {
@@ -233,7 +242,7 @@ exports.handler = async (event) => {
     }
     let quota = null;
     if (sub && vision && vision.verdict !== "غير واضح") {
-      try { await sub.use(); quota = { used: sub.used + 1, limit: sub.limit }; } catch (e) {}
+      try { await sub.use(); quota = { used: sub.used + 1, limit: sub.limit, plan: sub.plan, expires: sub.expires }; } catch (e) {}
     }
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ vision, quota, reply: r.text, model: r.model }) };
   }
