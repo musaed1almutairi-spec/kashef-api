@@ -247,7 +247,7 @@ exports.handler = async (event) => {
         const n = parseInt(String(vision.matchRef || "").replace(/[٠-٩]/g, d => d.charCodeAt(0) - 1632).replace(/\D+/g, " ").trim().split(" ")[0], 10);
         const ref = REFS[n - 1];
         const lbl = ref ? String(ref.label || "") : "";
-        if (!t || m === "لا يشبه" || !ref || !lbl.includes(t.split(/\s+/)[0]) || /أو|،|,|\//.test(t) || vision.typeSure !== true) vision.type = "";
+        if (!t || m === "لا يشبه" || !ref || !lbl.includes(t.split(/\s+/)[0]) || /أو|،|,|\//.test(t) || vision.typeSure !== true || /فيتنام|هند|ماليز|سيلان|سريلان|كمبود/.test(t)) vision.type = "";
         delete vision.typeSure;
       }
       if (m === "طبيعي") {
